@@ -57,7 +57,36 @@ def load_env_file(path: Path = Path(".env")) -> None:
 
 # Choose any 3 of the 15 points, e.g. CHOSEN_POINTS = [1, 7, 15]. Your agent
 # gives a PASS or FAIL verdict on these 3 points only, with your own rule for each.
-CHOSEN_POINTS: list[int] = []  ### YOUR CODE HERE
+CHOSEN_POINTS: list[int] = [4,5,7]
+  
+### YOUR CODE HERE
+MARGIN_QUERY = """
+WITH revenue AS (
+    SELECT SUM(amount) AS total
+    FROM orders
+    WHERE order_date >= '2025-01-01' AND order_date < '2026-01-01'
+), costs AS (
+    SELECT SUM(cost_of_sales + selling_admin + research_development) AS total
+    FROM monthly_costs
+    WHERE month >= '2025-01' AND month < '2026-01'
+), margins AS (
+    SELECT 100.0 * (revenue.total - costs.total)
+           / NULLIF(revenue.total, 0) AS company_margin,
+           industry_medians.operating_margin_pct AS industry_margin
+    FROM revenue
+    CROSS JOIN costs
+    CROSS JOIN company
+    JOIN industry_medians ON industry_medians.industry = company.industry
+)
+SELECT company_margin, industry_margin,
+       CASE
+           WHEN company_margin IS NULL OR industry_margin IS NULL THEN NULL
+           WHEN company_margin > 0 AND company_margin >= industry_margin
+               THEN 'PASS'
+           ELSE 'FAIL'
+       END AS verdict
+FROM margins
+"""
 
 
 def build_agent() -> Any:
@@ -72,7 +101,38 @@ def build_agent() -> Any:
     you will probably create one tool-calling agent per company there.
     """
     ### YOUR CODE HERE
-    return None
+    from langchain_core.output_parsers import JsonOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+    from langchain_deepseek import ChatDeepSeek
+
+    rules = """
+    Apply these Fisher criteria independently. Use the customer interview for
+    Point 4 and the employee interview for Point 7.
+
+    Point 4, sales organization: PASS when the customer describes a capable,
+    responsive sales team that understands customer needs and follows through.
+    FAIL when the evidence indicates recurring problems such as poor product
+    knowledge, unreliable follow-up, or weak after-sales support.
+
+    Point 7, labor and personnel relations: PASS when the employee describes
+    a healthy working environment with fair treatment, constructive management,
+    and generally positive morale. FAIL when the evidence indicates persistent
+    problems such as high turnover, unfair treatment, poor communication, or
+    unresolved complaints.
+
+    Weigh concrete details more heavily than generic praise or criticism.
+    Return a JSON object with keys "sales_verdict", "sales_reason",
+    "labor_verdict", and "labor_reason". Verdicts must be exactly PASS or FAIL.
+    Give one short English sentence per reason citing concrete interview evidence.
+    """
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", rules),
+            ("human", "Customer interview:\n{sales}\n\nEmployee interview:\n{labor}"),
+        ]
+    )
+    model = ChatDeepSeek(model=MODEL_NAME, timeout=60, max_retries=2)
+    return prompt | model | JsonOutputParser()
 
 
 async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict[str, dict[str, Any]]:
@@ -109,8 +169,58 @@ async def analyze_companies(agent: Any, companies: dict[str, list[Any]]) -> dict
     You may analyse companies in parallel (e.g. ``asyncio.gather``).
     """
     ### YOUR CODE HERE
-    _ = agent
-    return {name: {"points": {}, "summary": ""} for name in companies}
+    limit = asyncio.Semaphore(4)
+
+    async def analyze_one(name: str, tools: list[Any]) -> tuple[str, dict[str, Any]]:
+        _, _, sql_query, interview = tools
+        points: dict[int, str] = {}
+        reasons: dict[int, str] = {}
+
+        async with limit:
+            try:
+                result = await sql_query.ainvoke({"query": MARGIN_QUERY})
+                margin, median, verdict = result.splitlines()[1].split(" | ")
+                if verdict not in VERDICTS:
+                    raise ValueError("Missing FY2025 margin or industry median")
+
+                points[5] = verdict
+                reasons[5] = (
+                    f"FY2025 operating margin was {margin}% versus the "
+                    f"company's industry median of {median}%."
+                )
+            except Exception as exc:
+                reasons[5] = f"Margin evaluation unavailable ({type(exc).__name__})."
+                print(f"{name}: point 5 failed ({type(exc).__name__}).")
+
+            try:
+                sales = await interview.ainvoke(
+                    {"role": "customer", "topic": "sales_team"}
+                )
+                labor = await interview.ainvoke(
+                    {"role": "current_employee", "topic": "working_conditions"}
+                )
+                assessment = await agent.ainvoke({"sales": sales, "labor": labor})
+
+                for point, prefix in ((4, "sales"), (7, "labor")):
+                    verdict = assessment.get(f"{prefix}_verdict")
+                    reason = assessment.get(f"{prefix}_reason")
+                    if verdict in VERDICTS and isinstance(reason, str) and reason.strip():
+                        points[point] = verdict
+                        reasons[point] = reason.strip()
+                    else:
+                        reasons[point] = "The model returned an invalid assessment."
+            except Exception as exc:
+                reasons[4] = reasons[7] = (
+                    f"Interview evaluation unavailable ({type(exc).__name__})."
+                )
+                print(f"{name}: interview evaluation failed ({type(exc).__name__}).")
+
+        summary = " ".join(f"P{point}: {reasons[point]}" for point in CHOSEN_POINTS)
+        return name, {"points": points, "summary": summary}
+
+    return dict(
+        await asyncio.gather(*(analyze_one(name, tools) for name, tools in companies.items()))
+    )
 
 
 # Everything below is provided runner/scoring code. No edits are needed.

@@ -174,10 +174,36 @@ names and wording, and scores your 3 points only.
 > to students: this is your report, see the homework description.
 
 ### My 3 points and rules
-> for each point: why you chose it, your PASS rule in one or two sentences, and the evidence it uses. Quote Fisher where it helps.
+
+**Point 4 — Above-average sales organization.** I chose this point because customers can describe how the sales team works in practice, including whether it follows up after the sale. The agent interviews a customer about `sales_team`. It marks PASS when the customer describes a capable, responsive team that understands their needs and follows through. Recurring problems with product knowledge, communication, or after-sales support lead to FAIL.
+
+**Point 5 — Worthwhile profit margin.** I chose this point because a reasonable profit margin can vary by industry. The agent uses SQL to calculate FY2025 operating margin by subtracting the cost of sales, selling and administrative costs, and R&D expenses from revenue, then dividing by revenue. It marks PASS if the margin is positive and at least as high as the median for the company's own industry.
+
+**Point 7 — Labor and personnel relations.** I chose this point because a current employee can give specific examples of how people are treated at work. The agent interviews a current employee about `working_conditions`. It marks PASS when the interview describes fair treatment, constructive management, and generally positive morale. Persistent problems such as unfair treatment, high turnover, or unresolved complaints lead to FAIL.
 
 ### Design
-> a visualization of your agent design and one paragraph describing it.
+
+```mermaid
+flowchart TD
+    A["Company"] --> B["Customer interview"]
+    A --> C["Employee interview"]
+    A --> D["SQL query for FY2025 operating margin"]
+    B --> E["DeepSeek evaluates Points 4 and 7"]
+    C --> E
+    D --> F["SQL determines Point 5"]
+    E --> G["Combine the three verdicts and reasons"]
+    F --> G
+    G --> H["Write results.csv"]
+```
+
+The agent uses one SQL query and two interviews per company. SQL calculates the operating margin and compares it with the industry median. The two interviews go into one LangChain call to `deepseek-v4-flash`. The prompt gives the model separate rules for Points 4 and 7 and asks for a verdict and a short reason for each. The agent parses the JSON response and combines it with the SQL result to produce a company summary. It can process up to four companies at a time.
 
 ### Results
-> your point score on `public_test`, the companies where your verdicts disagree with the public answers, and why.
+
+I ran the public test with:
+
+```bash
+python hw3.py --data-folder public_test
+```
+
+The agent evaluated 20 companies and matched **60 out of 60** expected verdicts, with **100.0% balanced accuracy**. There were no disagreements with the public answer key. Points 4 and 7 each rely on a single interview, so mixed or vague answers could make those judgments harder on new companies.
